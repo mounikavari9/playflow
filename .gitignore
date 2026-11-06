@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# Go
+# ---------------------------------------------------------------------------
+# Build output
+/backend/bin/
+/backend/api
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.*
+*.coverprofile
+
+# Workspace files (local only)
+go.work
+go.work.sum
+
+# ---------------------------------------------------------------------------
+# Environment files and local secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+*.secret
+kubeconfig*
+.aws/
+
+# ---------------------------------------------------------------------------
+# Node.js / React (web/)
+# ---------------------------------------------------------------------------
+node_modules/
+web/dist/
+web/build/
+.npm/
+.eslintcache
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------------------
+# IDEs and editors
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code local (per-developer) settings
+.claude/settings.local.json
+
+# ---------------------------------------------------------------------------
+# OS
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
