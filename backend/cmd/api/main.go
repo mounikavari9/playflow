@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/mounikavari9/playflow/backend/internal/config"
+	"github.com/mounikavari9/playflow/backend/internal/platform/postgres"
 	"github.com/mounikavari9/playflow/backend/internal/server"
 )
 
@@ -40,6 +41,16 @@ func run(logger *slog.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Fail fast if the database is unreachable. pool.Close is deferred, so it
+	// runs when run returns: after the srv.Shutdown call below has drained HTTP.
+	pool, err := postgres.New(ctx, cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	connCfg := pool.Config().ConnConfig
+	logger.Info("connected to postgres", slog.String("host", connCfg.Host), slog.String("database", connCfg.Database))
 
 	srv := server.New(cfg, logger)
 

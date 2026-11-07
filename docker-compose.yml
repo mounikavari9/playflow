@@ -1,0 +1,25 @@
+# Local development infrastructure. Not for production use.
+# Credentials default to development-only values; override them in a local,
+# gitignored .env file (see .env.example).
+name: playflow
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-playflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-playflow}
+      POSTGRES_DB: ${POSTGRES_DB:-playflow}
+    ports:
+      # Bound to loopback only, so the database is not reachable from the network.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:

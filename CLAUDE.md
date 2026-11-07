@@ -10,10 +10,11 @@ Monorepo layout:
 
 | Path | Contents | Status |
 |---|---|---|
-| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Step 1 done |
+| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–2 done |
 | `web/` | React frontend | not yet created |
 | `deploy/` | Kubernetes manifests, AWS infrastructure | not yet created |
-| `docker-compose.yml`, `Makefile`, `.github/workflows/` | local infra, dev commands, CI | not yet created |
+| `docker-compose.yml`, `.env.example` | local infra (PostgreSQL only so far), dev-only env template | Step 2 done |
+| `Makefile`, `.github/workflows/` | dev commands, CI | not yet created |
 
 PAY-001 builds the foundation one step at a time. Status:
 
@@ -23,15 +24,29 @@ PAY-001 builds the foundation one step at a time. Status:
   - `internal/config`: env config and its tests
   - `internal/server`: Gin router, request-logging middleware, `http.Server` timeouts, and tests
   - `internal/health`: `GET /healthz` liveness handler and its tests
-- **Planned, not implemented yet:** PostgreSQL, Redis, Dockerfile and Docker Compose, Makefile, `/readyz` readiness checks, golangci-lint, GitHub Actions. Don't assume these exist.
+- **Step 2 (done):** PostgreSQL.
+  - `internal/config`: `DATABASE_URL` (required), `DB_MAX_CONNS`, `DB_CONNECT_TIMEOUT`
+  - `internal/platform/postgres`: `New()` builds a `pgxpool` (pgx v5) and pings it; unit tests plus a gated integration test
+  - `cmd/api/main.go`: connects at startup (fails fast if unreachable) and closes the pool after HTTP shutdown
+  - `docker-compose.yml`: `postgres:17-alpine` on `127.0.0.1:5432`, dev-only credentials
+- **Planned, not implemented yet:** migrations/schema, Redis, app Dockerfile and app service in Compose, Makefile, `/readyz` readiness checks, golangci-lint, GitHub Actions. Don't assume these exist.
 
 ## Commands
+
+Local PostgreSQL, from the repo root (credentials are dev-only defaults; override in a gitignored `.env`, see `.env.example`):
+
+```sh
+docker compose up -d --wait postgres              # start and wait until healthy
+docker compose down                               # stop (add -v to wipe the data volume)
+```
 
 Run from `backend/`:
 
 ```sh
-go run ./cmd/api                                   # start API on :8080 (PORT, APP_ENV, SHUTDOWN_TIMEOUT env vars)
-go test -race ./...                                # all unit tests
+export DATABASE_URL='postgres://playflow:playflow@localhost:5432/playflow?sslmode=disable'
+go run ./cmd/api                                   # start API on :8080 (env: PORT, APP_ENV, SHUTDOWN_TIMEOUT, DATABASE_URL, DB_MAX_CONNS, DB_CONNECT_TIMEOUT)
+go test -race ./...                                # all unit tests (DB integration test is skipped)
+TEST_DATABASE_URL="$DATABASE_URL" go test -race ./internal/platform/postgres -v   # integration test against Compose Postgres
 go test -race ./internal/health -run TestLiveness -v   # single test
 go vet ./...
 gofmt -l .                                         # must print nothing
@@ -41,7 +56,7 @@ Check: `curl -i localhost:8080/healthz` → `200 {"status":"ok"}`.
 
 ## Architecture
 
-- `cmd/api/main.go` is the only place dependencies are wired. `run()` loads config, builds the server, and handles SIGINT/SIGTERM with a graceful `Shutdown` bounded by `ShutdownTimeout`. Global side effects such as `gin.SetMode` happen here and nowhere else.
+- `cmd/api/main.go` is the only place dependencies are wired. `run()` loads config, connects to PostgreSQL (exits non-zero if it can't), builds the server, and handles SIGINT/SIGTERM with a graceful `Shutdown` bounded by `ShutdownTimeout`; the DB pool closes after HTTP shutdown. Global side effects such as `gin.SetMode` happen here and nowhere else.
 - `internal/config`:
   - Config comes **only** from environment variables.
   - `Load()` wraps an injectable `lookupFunc`, so tests never touch the real env.
@@ -55,7 +70,9 @@ Check: `curl -i localhost:8080/healthz` → `200 {"status":"ok"}`.
 - `internal/health` holds the probe handlers.
   - `/healthz` (liveness) must **never** check external dependencies, because a database or cache outage must not trigger pod restarts.
   - Dependency checks belong in the planned `/readyz`.
-- Infrastructure clients will go in `internal/platform/<name>`. Domain packages should depend on interfaces, not on drivers.
+- Infrastructure clients go in `internal/platform/<name>`. Domain packages should depend on interfaces, not on drivers.
+- `internal/platform/postgres`: `New(ctx, config.DatabaseConfig)` returns a pinged `*pgxpool.Pool`; the caller closes it. Integration tests run only when `TEST_DATABASE_URL` is set.
+- `DATABASE_URL` contains credentials: never log it or put it in error messages. Config and postgres errors deliberately avoid wrapping URL-parse errors because they echo the input.
 
 ## Go standards used here
 
