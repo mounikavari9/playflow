@@ -10,7 +10,7 @@ Monorepo layout:
 
 | Path | Contents | Status |
 |---|---|---|
-| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–2 done |
+| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–3 done |
 | `web/` | React frontend | not yet created |
 | `deploy/` | Kubernetes manifests, AWS infrastructure | not yet created |
 | `docker-compose.yml`, `.env.example` | local infra (PostgreSQL only so far), dev-only env template | Step 2 done |
@@ -29,7 +29,10 @@ PAY-001 builds the foundation one step at a time. Status:
   - `internal/platform/postgres`: `New()` builds a `pgxpool` (pgx v5) and pings it; unit tests plus a gated integration test
   - `cmd/api/main.go`: connects at startup (fails fast if unreachable) and closes the pool after HTTP shutdown
   - `docker-compose.yml`: `postgres:17-alpine` on `127.0.0.1:5432`, dev-only credentials
-- **Planned, not implemented yet:** migrations/schema, Redis, app Dockerfile and app service in Compose, Makefile, `/readyz` readiness checks, golangci-lint, GitHub Actions. Don't assume these exist.
+- **Step 3 (done):** Goose SQL migrations.
+  - `backend/migrations/00001_create_set_updated_at_function.sql`: shared `set_updated_at()` trigger function, reversible. There are no tables yet.
+  - Goose is a pinned CLI run with `go run`, not an application dependency. The API does **not** run migrations at startup.
+- **Planned, not implemented yet:** domain tables, Redis, app Dockerfile and app service in Compose, Makefile, `/readyz` readiness checks, golangci-lint, GitHub Actions. Don't assume these exist.
 
 ## Commands
 
@@ -53,6 +56,27 @@ gofmt -l .                                         # must print nothing
 ```
 
 Check: `curl -i localhost:8080/healthz` → `200 {"status":"ok"}`.
+
+Migrations, from `backend/` with `DATABASE_URL` exported. Goose is pinned to **v3.27.0** because it's the newest release that builds on Go 1.25.x; v3.28.0+ need Go 1.26. `GOTOOLCHAIN=local` makes a version bump fail loudly instead of silently downloading a newer toolchain.
+
+```sh
+goose() { GOTOOLCHAIN=local go run github.com/pressly/goose/v3/cmd/goose@v3.27.0 "$@"; }   # works in zsh and bash
+goose -dir migrations validate                                # check files only, no DB
+goose -dir migrations postgres "$DATABASE_URL" status         # Pending / Applied per file
+goose -dir migrations postgres "$DATABASE_URL" up             # apply all pending
+goose -dir migrations postgres "$DATABASE_URL" down           # roll back the latest one
+goose -dir migrations postgres "$DATABASE_URL" version        # current DB version
+goose -dir migrations -s create <name> sql                    # new sequential file (00002_<name>.sql)
+```
+
+Migration rules:
+- Files are sequential (`NNNNN_name.sql`, made with `-s`). Every file needs a working `-- +goose Down` section.
+- Wrap function bodies or other statements containing `;` in `-- +goose StatementBegin` / `-- +goose StatementEnd`.
+- Each file runs in a transaction by default.
+- Never edit a migration once it has been applied anywhere shared. Add a new one instead.
+- Before committing a new migration, test the round trip: `up` → `down` → `up`.
+- Goose tracks applied versions in the `goose_db_version` table.
+- Goose auto-loads `.env` from the current directory (`-env` flag). The project's `.env` lives at the repo root, so keep `GOOSE_*` variables out of any `backend/.env`.
 
 ## Architecture
 
