@@ -10,7 +10,7 @@ Monorepo layout:
 
 | Path | Contents | Status |
 |---|---|---|
-| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–3 done |
+| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–4 done |
 | `web/` | React frontend | not yet created |
 | `deploy/` | Kubernetes manifests, AWS infrastructure | not yet created |
 | `docker-compose.yml`, `.env.example` | local infra (PostgreSQL only so far), dev-only env template | Step 2 done |
@@ -32,7 +32,10 @@ PAY-001 builds the foundation one step at a time. Status:
 - **Step 3 (done):** Goose SQL migrations.
   - `backend/migrations/00001_create_set_updated_at_function.sql`: shared `set_updated_at()` trigger function, reversible. There are no tables yet.
   - Goose is a pinned CLI run with `go run`, not an application dependency. The API does **not** run migrations at startup.
-- **Planned, not implemented yet:** domain tables, Redis, app Dockerfile and app service in Compose, Makefile, `/readyz` readiness checks, golangci-lint, GitHub Actions. Don't assume these exist.
+- **Step 4 (done):** `GET /readyz` readiness probe.
+  - `internal/health`: `Pinger` interface and `Readiness()` handler, which pings PostgreSQL with a 2s timeout
+  - `internal/server`: `New` and `NewRouter` take a `health.Pinger`; `cmd/api/main.go` passes the pool
+- **Planned, not implemented yet:** domain tables, Redis, app Dockerfile and app service in Compose, Makefile, golangci-lint, GitHub Actions. Don't assume these exist.
 
 ## Commands
 
@@ -55,7 +58,10 @@ go vet ./...
 gofmt -l .                                         # must print nothing
 ```
 
-Check: `curl -i localhost:8080/healthz` → `200 {"status":"ok"}`.
+Checks:
+- `curl -i localhost:8080/healthz` → `200 {"status":"ok"}`, whatever state the database is in.
+- `curl -i localhost:8080/readyz` → `200 {"status":"ok"}` while the database is up. It returns `503 {"status":"unavailable"}` after `docker compose stop postgres` (immediately) or `docker compose pause postgres` (after the 2s timeout).
+- After `docker compose start` or `unpause`, `/readyz` returns 200 again without restarting the API, because pgxpool reconnects on its own.
 
 Migrations, from `backend/` with `DATABASE_URL` exported. Goose is pinned to **v3.27.0** because it's the newest release that builds on Go 1.25.x; v3.28.0+ need Go 1.26. `GOTOOLCHAIN=local` makes a version bump fail loudly instead of silently downloading a newer toolchain.
 
@@ -93,7 +99,11 @@ Migration rules:
   - `HandleMethodNotAllowed` is on, so a wrong method returns 405.
 - `internal/health` holds the probe handlers.
   - `/healthz` (liveness) must **never** check external dependencies, because a database or cache outage must not trigger pod restarts.
-  - Dependency checks belong in the planned `/readyz`.
+  - `/readyz` (readiness) is built by `health.Readiness(db Pinger, timeout, logger)`. It pings the database with a deadline taken from the request context, and the timeout is the `readinessTimeout` constant (2s) in `internal/server`.
+  - **Kubernetes:** the readiness probe's `timeoutSeconds` must be greater than 2. The Kubernetes default is 1.
+  - Responses carry only `{"status":"ok"}` (200) or `{"status":"unavailable"}` (503), never error details.
+  - A failed check logs only `dependency` and a `reason` of `timeout`, `canceled` or `unavailable`. The reason comes from the context's state, never from the raw driver error, which can name the host and user.
+  - `health.Pinger` keeps the package free of pgx; `*pgxpool.Pool` satisfies it.
 - Infrastructure clients go in `internal/platform/<name>`. Domain packages should depend on interfaces, not on drivers.
 - `internal/platform/postgres`: `New(ctx, config.DatabaseConfig)` returns a pinged `*pgxpool.Pool`; the caller closes it. Integration tests run only when `TEST_DATABASE_URL` is set.
 - `DATABASE_URL` contains credentials: never log it or put it in error messages. Config and postgres errors deliberately avoid wrapping URL-parse errors because they echo the input.

@@ -52,7 +52,7 @@ func run(logger *slog.Logger) error {
 	connCfg := pool.Config().ConnConfig
 	logger.Info("connected to postgres", slog.String("host", connCfg.Host), slog.String("database", connCfg.Database))
 
-	srv := server.New(cfg, logger)
+	srv := server.New(cfg, logger, pool)
 
 	serverErr := make(chan error, 1)
 	go func() {
