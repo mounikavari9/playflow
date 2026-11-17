@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,11 +23,13 @@ const (
 
 // Default values applied when the corresponding environment variable is unset.
 const (
-	DefaultPort             = 8080
-	DefaultEnv              = EnvLocal
-	DefaultShutdownTimeout  = 10 * time.Second
-	DefaultDBMaxConns       = 10
-	DefaultDBConnectTimeout = 5 * time.Second
+	DefaultPort                = 8080
+	DefaultEnv                 = EnvLocal
+	DefaultShutdownTimeout     = 10 * time.Second
+	DefaultDBMaxConns          = 10
+	DefaultDBConnectTimeout    = 5 * time.Second
+	DefaultRedisPoolSize       = 10
+	DefaultRedisConnectTimeout = 5 * time.Second
 )
 
 // Config holds all runtime configuration for the API service.
@@ -38,6 +42,32 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	// Database holds PostgreSQL connection settings.
 	Database DatabaseConfig
+	// Redis holds Redis connection settings.
+	Redis RedisConfig
+}
+
+// RedisConfig holds Redis connection settings.
+type RedisConfig struct {
+	// URL is the Redis connection URL (env: REDIS_URL, required), in the form
+	// redis[s]://[user]:password@host[:port][/db]. It contains credentials and
+	// must never be logged. Query parameters are rejected, so options such as
+	// skip_verify cannot be smuggled in. In staging and production it must use
+	// rediss:// (TLS) unless the host is loopback, e.g. a TLS-terminating sidecar.
+	URL string
+	// PoolSize caps the number of connections (env: REDIS_POOL_SIZE).
+	PoolSize int
+	// ConnectTimeout bounds dialing and the startup ping (env: REDIS_CONNECT_TIMEOUT).
+	ConnectTimeout time.Duration
+}
+
+// LogValue implements slog.LogValuer so that logging a RedisConfig never
+// exposes the connection URL or its credentials.
+func (r RedisConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("url", "[REDACTED]"),
+		slog.Int("pool_size", r.PoolSize),
+		slog.Duration("connect_timeout", r.ConnectTimeout),
+	)
 }
 
 // DatabaseConfig holds PostgreSQL connection settings.
@@ -59,6 +89,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("env", c.Env),
 		slog.Duration("shutdown_timeout", c.ShutdownTimeout),
 		slog.Any("database", c.Database),
+		slog.Any("redis", c.Redis),
 	)
 }
 
@@ -98,6 +129,10 @@ func load(lookup lookupFunc) (Config, error) {
 		Database: DatabaseConfig{
 			MaxConns:       DefaultDBMaxConns,
 			ConnectTimeout: DefaultDBConnectTimeout,
+		},
+		Redis: RedisConfig{
+			PoolSize:       DefaultRedisPoolSize,
+			ConnectTimeout: DefaultRedisConnectTimeout,
 		},
 	}
 
@@ -168,6 +203,39 @@ func load(lookup lookupFunc) (Config, error) {
 		}
 	}
 
+	// Runs after APP_ENV is parsed, because the TLS rule depends on it.
+	if v, ok := lookup("REDIS_URL"); !ok || v == "" {
+		errs = append(errs, errors.New("REDIS_URL: required"))
+	} else if err := validateRedisURL(v, cfg.Env); err != nil {
+		errs = append(errs, fmt.Errorf("REDIS_URL: %w", err))
+	} else {
+		cfg.Redis.URL = v
+	}
+
+	if v, ok := lookup("REDIS_POOL_SIZE"); ok && v != "" {
+		n, err := strconv.Atoi(v)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("REDIS_POOL_SIZE: %w", err))
+		case n < 1:
+			errs = append(errs, fmt.Errorf("REDIS_POOL_SIZE: must be at least 1, got %d", n))
+		default:
+			cfg.Redis.PoolSize = n
+		}
+	}
+
+	if v, ok := lookup("REDIS_CONNECT_TIMEOUT"); ok && v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("REDIS_CONNECT_TIMEOUT: %w", err))
+		case d <= 0:
+			errs = append(errs, fmt.Errorf("REDIS_CONNECT_TIMEOUT: must be positive, got %s", d))
+		default:
+			cfg.Redis.ConnectTimeout = d
+		}
+	}
+
 	if err := errors.Join(errs...); err != nil {
 		return Config{}, fmt.Errorf("load config: %w", err)
 	}
@@ -189,4 +257,45 @@ func validateDatabaseURL(raw string) error {
 		return errors.New("missing host")
 	}
 	return nil
+}
+
+// validateRedisURL checks the shape and transport security of a Redis URL.
+// Like validateDatabaseURL, its errors never include the URL or any part of it
+// that could carry credentials.
+func validateRedisURL(raw, env string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("not a valid URL")
+	}
+	if u.Scheme != "redis" && u.Scheme != "rediss" {
+		return fmt.Errorf("scheme must be redis or rediss, got %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("missing host")
+	}
+	// go-redis turns query parameters into client options, including
+	// skip_verify, which disables TLS certificate verification.
+	if u.RawQuery != "" || u.ForceQuery {
+		return errors.New("query parameters are not supported")
+	}
+	if p := strings.Trim(u.Path, "/"); p != "" {
+		if db, err := strconv.Atoi(p); err != nil || db < 0 {
+			return errors.New("path must be a non-negative database number, e.g. /0")
+		}
+	}
+	if (env == EnvStaging || env == EnvProduction) && u.Scheme != "rediss" && !isLoopback(host) {
+		return fmt.Errorf("rediss:// (TLS) is required in %s unless the host is loopback", env)
+	}
+	return nil
+}
+
+// isLoopback reports whether host names the local machine, where plaintext is
+// acceptable because a sidecar proxy can provide TLS on the network hop.
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

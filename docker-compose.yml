@@ -21,5 +21,24 @@ services:
       timeout: 3s
       retries: 10
 
+  redis:
+    image: redis:8-alpine
+    # A password is required even locally so the client's auth path is always
+    # exercised. --requirepass is visible in the container's process list,
+    # which is acceptable for this dev-only service. No data volume: Redis data
+    # is disposable here and `docker compose down` discards it.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-playflow}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-playflow}
+    ports:
+      # Bound to loopback only, so Redis is not reachable from the network.
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      # REDISCLI_AUTH keeps the password off the redis-cli command line.
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   postgres-data:

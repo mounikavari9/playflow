@@ -15,6 +15,7 @@ import (
 
 	"github.com/mounikavari9/playflow/backend/internal/config"
 	"github.com/mounikavari9/playflow/backend/internal/platform/postgres"
+	"github.com/mounikavari9/playflow/backend/internal/platform/redis"
 	"github.com/mounikavari9/playflow/backend/internal/server"
 )
 
@@ -51,6 +52,22 @@ func run(logger *slog.Logger) error {
 	defer pool.Close()
 	connCfg := pool.Config().ConnConfig
 	logger.Info("connected to postgres", slog.String("host", connCfg.Host), slog.String("database", connCfg.Database))
+
+	// Redis is not a readiness dependency (see /readyz), but startup still
+	// fails fast so misconfiguration surfaces at deploy time. Tradeoff: while
+	// Redis is down, new pods cannot start even though running pods keep
+	// serving. Revisit once Redis has consumers that can degrade gracefully.
+	// The deferred Close runs before pool.Close, both after HTTP has drained.
+	rdb, err := redis.New(ctx, cfg.Redis)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := rdb.Close(); err != nil {
+			logger.Warn("closing redis client", slog.Any("error", err))
+		}
+	}()
+	logger.Info("connected to redis", slog.String("addr", rdb.Options().Addr), slog.Int("db", rdb.Options().DB))
 
 	srv := server.New(cfg, logger, pool)
 

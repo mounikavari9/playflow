@@ -10,10 +10,10 @@ Monorepo layout:
 
 | Path | Contents | Status |
 |---|---|---|
-| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–4 done |
+| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–5 done |
 | `web/` | React frontend | not yet created |
 | `deploy/` | Kubernetes manifests, AWS infrastructure | not yet created |
-| `docker-compose.yml`, `.env.example` | local infra (PostgreSQL only so far), dev-only env template | Step 2 done |
+| `docker-compose.yml`, `.env.example` | local infra (PostgreSQL and Redis), dev-only env template | Steps 2 and 5 done |
 | `Makefile`, `.github/workflows/` | dev commands, CI | not yet created |
 
 PAY-001 builds the foundation one step at a time. Status:
@@ -35,14 +35,21 @@ PAY-001 builds the foundation one step at a time. Status:
 - **Step 4 (done):** `GET /readyz` readiness probe.
   - `internal/health`: `Pinger` interface and `Readiness()` handler, which pings PostgreSQL with a 2s timeout
   - `internal/server`: `New` and `NewRouter` take a `health.Pinger`; `cmd/api/main.go` passes the pool
-- **Planned, not implemented yet:** domain tables, Redis, app Dockerfile and app service in Compose, Makefile, golangci-lint, GitHub Actions. Don't assume these exist.
+- **Step 5 (done):** Redis connection (no Redis features yet).
+  - `go.mod`: `github.com/redis/go-redis/v9` pinned to **v9.22.0**, the newest release that builds on Go 1.25.x; v9.23.0+ need Go 1.26. Add or upgrade with `GOTOOLCHAIN=local go get`.
+  - `internal/config`: `REDIS_URL` (required), `REDIS_POOL_SIZE`, `REDIS_CONNECT_TIMEOUT`
+  - `internal/platform/redis`: `New()` builds a go-redis client and pings it; unit tests plus gated integration tests
+  - `cmd/api/main.go`: connects after PostgreSQL (fails fast if unreachable) and closes the client after HTTP shutdown
+  - `docker-compose.yml`: `redis:8-alpine` on `127.0.0.1:6379`, password required, no data volume
+  - Redis is deliberately **not** checked by `/readyz`.
+- **Planned, not implemented yet:** domain tables, Redis features (caching, rate limiting), app Dockerfile and app service in Compose, Makefile, golangci-lint, GitHub Actions. Don't assume these exist.
 
 ## Commands
 
-Local PostgreSQL, from the repo root (credentials are dev-only defaults; override in a gitignored `.env`, see `.env.example`):
+Local PostgreSQL and Redis, from the repo root (credentials are dev-only defaults; override in a gitignored `.env`, see `.env.example`):
 
 ```sh
-docker compose up -d --wait postgres              # start and wait until healthy
+docker compose up -d --wait postgres redis        # start and wait until healthy
 docker compose down                               # stop (add -v to wipe the data volume)
 ```
 
@@ -50,9 +57,11 @@ Run from `backend/`:
 
 ```sh
 export DATABASE_URL='postgres://playflow:playflow@localhost:5432/playflow?sslmode=disable'
-go run ./cmd/api                                   # start API on :8080 (env: PORT, APP_ENV, SHUTDOWN_TIMEOUT, DATABASE_URL, DB_MAX_CONNS, DB_CONNECT_TIMEOUT)
-go test -race ./...                                # all unit tests (DB integration test is skipped)
+export REDIS_URL='redis://:playflow@localhost:6379/0'
+go run ./cmd/api                                   # start API on :8080 (env: PORT, APP_ENV, SHUTDOWN_TIMEOUT, DATABASE_URL, DB_MAX_CONNS, DB_CONNECT_TIMEOUT, REDIS_URL, REDIS_POOL_SIZE, REDIS_CONNECT_TIMEOUT)
+go test -race ./...                                # all unit tests (integration tests are skipped)
 TEST_DATABASE_URL="$DATABASE_URL" go test -race ./internal/platform/postgres -v   # integration test against Compose Postgres
+TEST_REDIS_URL="$REDIS_URL" go test -race ./internal/platform/redis -v            # integration tests against Compose Redis
 go test -race ./internal/health -run TestLiveness -v   # single test
 go vet ./...
 gofmt -l .                                         # must print nothing
@@ -62,6 +71,9 @@ Checks:
 - `curl -i localhost:8080/healthz` → `200 {"status":"ok"}`, whatever state the database is in.
 - `curl -i localhost:8080/readyz` → `200 {"status":"ok"}` while the database is up. It returns `503 {"status":"unavailable"}` after `docker compose stop postgres` (immediately) or `docker compose pause postgres` (after the 2s timeout).
 - After `docker compose start` or `unpause`, `/readyz` returns 200 again without restarting the API, because pgxpool reconnects on its own.
+- `docker compose stop redis` (or `pause`) while the API runs: `/healthz` and `/readyz` both stay 200 and the API keeps running.
+- Starting the API while Redis is stopped exits 1 within about 1–2s (`redis: ping: … connection refused`). While Redis is paused it exits after `REDIS_CONNECT_TIMEOUT` (`context deadline exceeded`). A wrong password exits with `WRONGPASS`. Port 8080 never opens in any of these cases.
+- Redis is used by nothing after startup yet, so a Redis restart has no visible effect. go-redis dials new connections on demand.
 
 Migrations, from `backend/` with `DATABASE_URL` exported. Goose is pinned to **v3.27.0** because it's the newest release that builds on Go 1.25.x; v3.28.0+ need Go 1.26. `GOTOOLCHAIN=local` makes a version bump fail loudly instead of silently downloading a newer toolchain.
 
@@ -86,7 +98,7 @@ Migration rules:
 
 ## Architecture
 
-- `cmd/api/main.go` is the only place dependencies are wired. `run()` loads config, connects to PostgreSQL (exits non-zero if it can't), builds the server, and handles SIGINT/SIGTERM with a graceful `Shutdown` bounded by `ShutdownTimeout`; the DB pool closes after HTTP shutdown. Global side effects such as `gin.SetMode` happen here and nowhere else.
+- `cmd/api/main.go` is the only place dependencies are wired. `run()` loads config, connects to PostgreSQL and then Redis (exits non-zero if either fails), builds the server, and handles SIGINT/SIGTERM with a graceful `Shutdown` bounded by `ShutdownTimeout`; the Redis client and then the DB pool close after HTTP shutdown. Global side effects such as `gin.SetMode` happen here and nowhere else.
 - `internal/config`:
   - Config comes **only** from environment variables.
   - `Load()` wraps an injectable `lookupFunc`, so tests never touch the real env.
@@ -107,6 +119,19 @@ Migration rules:
 - Infrastructure clients go in `internal/platform/<name>`. Domain packages should depend on interfaces, not on drivers.
 - `internal/platform/postgres`: `New(ctx, config.DatabaseConfig)` returns a pinged `*pgxpool.Pool`; the caller closes it. Integration tests run only when `TEST_DATABASE_URL` is set.
 - `DATABASE_URL` contains credentials: never log it or put it in error messages. Config and postgres errors deliberately avoid wrapping URL-parse errors because they echo the input.
+- `internal/platform/redis`: `New(ctx, config.RedisConfig)` returns a pinged `*goredis.Client` (go-redis is imported as `goredis`); the caller closes it. Integration tests run only when `TEST_REDIS_URL` is set.
+  - `ContextTimeoutEnabled` is on, so context deadlines apply to every Redis command.
+  - The ping error is wrapped, but replaced by an opaque error if its text ever contains the password. go-redis dial errors name only `host:port`, and AUTH failures are the server's `WRONGPASS` reply.
+  - `options()` refuses `InsecureSkipVerify` as a second line of defense.
+- Redis readiness and startup policy:
+  - Redis is a **soft dependency** and is **not** in `/readyz`. Every pod shares one Redis, so gating readiness on it would mark every pod unready at once and turn a Redis outage into a full API outage. Data that must survive (payments, ledgers, idempotency keys) lives in PostgreSQL. Future Redis features must degrade on their own: a cache miss falls through to the DB, and rate limiting fails open or closed as an explicit choice.
+  - Startup still **fails fast** if Redis is unreachable, so misconfiguration surfaces at deploy time. **Tradeoff:** while Redis is down, new pods (scale-up, rollouts) crash-loop even though running pods keep serving. Revisit, and consider starting degraded with a warning, once Redis has real consumers.
+- `REDIS_URL` rules (`redis[s]://[user]:password@host[:port][/db]`):
+  - It contains credentials: never log it or put it in error messages. `RedisConfig.LogValue` redacts it.
+  - Only `redis` and `rediss` schemes; host required; the path may only be a non-negative DB number.
+  - **Query parameters are rejected.** go-redis maps them onto client options, including `skip_verify`, which disables certificate verification.
+  - **TLS:** in `staging` and `production`, `rediss://` is required unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`). The loopback exception supports a TLS-terminating sidecar proxy in the pod. A transparent service mesh where the app dials a cluster hostname over plaintext is **not** covered and would need a deliberate change. TLS always verifies certificates against the system CA store, with TLS 1.2 minimum. Supply a private CA through Go's standard `SSL_CERT_FILE`/`SSL_CERT_DIR`, not a new option.
+  - Known gap (out of scope for now): go-redis writes some internal messages as plain text to stderr (e.g. `pool.go: failed to dial`), outside slog. They name only `host:port`.
 
 ## Go standards used here
 
