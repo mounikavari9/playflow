@@ -16,7 +16,9 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      # -h forces TCP. On first boot the image runs a temporary server that
+      # listens only on the Unix socket, which must not count as healthy.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -39,6 +41,49 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  api:
+    image: playflow-api:local
+    build:
+      context: ./backend
+    # The URLs are built here on purpose. DATABASE_URL and REDIS_URL in .env name
+    # localhost for host-run tools, which inside this container would be the API
+    # itself. Passwords are inserted unencoded, so keep them URL-safe.
+    environment:
+      APP_ENV: local
+      # The port inside the container. API_PORT below only changes the host side.
+      PORT: "8080"
+      SHUTDOWN_TIMEOUT: 10s
+      DATABASE_URL: postgres://${POSTGRES_USER:-playflow}:${POSTGRES_PASSWORD:-playflow}@postgres:5432/${POSTGRES_DB:-playflow}?sslmode=disable
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-10}
+      DB_CONNECT_TIMEOUT: ${DB_CONNECT_TIMEOUT:-5s}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-playflow}@redis:6379/0
+      REDIS_POOL_SIZE: ${REDIS_POOL_SIZE:-10}
+      REDIS_CONNECT_TIMEOUT: ${REDIS_CONNECT_TIMEOUT:-5s}
+    ports:
+      # Bound to loopback only, so the API is not reachable from the network.
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # The probe allows 3s, longer than the 2s /readyz limit and shorter than
+      # the 5s timeout here. Compose does not restart unhealthy containers.
+      test: ["CMD", "/usr/local/bin/healthcheck", "/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+      start_interval: 1s
+    # Must exceed SHUTDOWN_TIMEOUT, or Docker kills the API mid-shutdown.
+    stop_grace_period: 15s
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   postgres-data:

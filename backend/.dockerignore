@@ -1,0 +1,34 @@
+# Allowlist: the build context holds only what the Go build needs.
+*
+!go.mod
+!go.sum
+!cmd
+!internal
+
+# Never part of the image, even inside allowed directories.
+**/*_test.go
+
+# Environment files.
+**/.env
+**/.env.*
+
+# Private keys, certificates and keystores.
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/id_rsa*
+**/id_ed25519*
+
+# Credentials and cloud configuration.
+**/*.secret
+**/secrets
+**/kubeconfig*
+**/.aws
+**/.ssh
+**/.netrc
+**/.npmrc
+**/.git-credentials

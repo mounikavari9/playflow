@@ -10,10 +10,10 @@ Monorepo layout:
 
 | Path | Contents | Status |
 |---|---|---|
-| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–5 done |
+| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–6 done |
 | `web/` | React frontend | not yet created |
 | `deploy/` | Kubernetes manifests, AWS infrastructure | not yet created |
-| `docker-compose.yml`, `.env.example` | local infra (PostgreSQL and Redis), dev-only env template | Steps 2 and 5 done |
+| `docker-compose.yml`, `.env.example` | local stack (PostgreSQL, Redis and the API), dev-only env template | Steps 2, 5 and 6 done |
 | `Makefile`, `.github/workflows/` | dev commands, CI | not yet created |
 
 PAY-001 builds the foundation one step at a time. Status:
@@ -42,7 +42,13 @@ PAY-001 builds the foundation one step at a time. Status:
   - `cmd/api/main.go`: connects after PostgreSQL (fails fast if unreachable) and closes the client after HTTP shutdown
   - `docker-compose.yml`: `redis:8-alpine` on `127.0.0.1:6379`, password required, no data volume
   - Redis is deliberately **not** checked by `/readyz`.
-- **Planned, not implemented yet:** domain tables, Redis features (caching, rate limiting), app Dockerfile and app service in Compose, Makefile, golangci-lint, GitHub Actions. Don't assume these exist.
+- **Step 6 (done):** containerized API.
+  - `backend/Dockerfile`: multi-stage build on `golang:1.25.14-bookworm`, runtime on `gcr.io/distroless/static-debian12:nonroot`, both pinned by digest
+  - `backend/.dockerignore`: allowlist for the build context, with explicit exclusions for env files, private keys and credentials
+  - `cmd/healthcheck`: standard-library probe binary, because the runtime image has no shell, curl or wget
+  - `docker-compose.yml`: `api` service on `127.0.0.1:${API_PORT:-8080}`
+  - `docker-compose.yml`: the `postgres` healthcheck now uses `pg_isready -h 127.0.0.1`, so it tests TCP
+- **Planned, not implemented yet:** domain tables, Redis features (caching, rate limiting), automated migrations in Compose, Makefile, golangci-lint, GitHub Actions. Don't assume these exist.
 
 ## Commands
 
@@ -51,6 +57,23 @@ Local PostgreSQL and Redis, from the repo root (credentials are dev-only default
 ```sh
 docker compose up -d --wait postgres redis        # start and wait until healthy
 docker compose down                               # stop (add -v to wipe the data volume)
+```
+
+Containerized API, from the repo root:
+
+```sh
+docker compose up -d --build --wait               # build the API and start the full stack
+docker compose logs -f api                        # follow API logs
+docker compose stop api                           # graceful stop (exit code 0)
+API_PORT=18080 docker compose up -d --wait api    # use another host port if 8080 is taken
+```
+
+Run failure tests in a separate Compose project so the development volume is never touched. This helper uses `.env.example` values and separate ports. The ports apply to each call only and are not exported to your shell:
+
+```sh
+compose_test() { POSTGRES_PORT=55432 REDIS_PORT=56379 API_PORT=18080 docker compose -p playflow-test --env-file .env.example "$@"; }   # works in zsh and bash
+compose_test up -d --build --wait                 # start the isolated stack; the API is on 127.0.0.1:18080
+compose_test down -v                              # removes only this project's containers and volumes
 ```
 
 Run from `backend/`:
@@ -74,6 +97,18 @@ Checks:
 - `docker compose stop redis` (or `pause`) while the API runs: `/healthz` and `/readyz` both stay 200 and the API keeps running.
 - Starting the API while Redis is stopped exits 1 within about 1–2s (`redis: ping: … connection refused`). While Redis is paused it exits after `REDIS_CONNECT_TIMEOUT` (`context deadline exceeded`). A wrong password exits with `WRONGPASS`. Port 8080 never opens in any of these cases.
 - Redis is used by nothing after startup yet, so a Redis restart has no visible effect. go-redis dials new connections on demand.
+
+Container checks, using the `compose_test` helper above and the API on `127.0.0.1:18080`:
+- `compose_test up -d --build --wait` exits 0 on empty volumes, and `compose_test ps api` shows the API as healthy.
+- `docker image inspect -f '{{.Config.User}}' playflow-api:local` → `65532:65532`.
+- `docker top "$(compose_test ps -q api)" -eo pid,uid,args` shows the API running as UID `65532`.
+- `docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}}' "$(compose_test ps -q api)"` → `true [ALL]`.
+- `docker run --rm --entrypoint /bin/sh playflow-api:local` fails, because the image has no shell.
+- `docker exec "$(compose_test ps -q api)" /usr/local/bin/healthcheck /readyz` exits 0, and the same command with `/missing` exits 1.
+- `compose_test stop postgres`: `/readyz` returns 503, `/healthz` stays 200, and the container turns unhealthy but keeps running. After `compose_test start postgres`, `/readyz` returns 200 and the container is healthy again without an API restart.
+- `compose_test stop redis`: `/healthz` and `/readyz` both stay 200.
+- `compose_test stop api`: `docker inspect -f '{{.State.ExitCode}}' "$(compose_test ps -aq api)"` → `0`, and `compose_test logs api` contains `api stopped gracefully`.
+- With Redis stopped, `compose_test up -d --no-deps api` exits the API with code 1 and port 18080 stays closed.
 
 Migrations, from `backend/` with `DATABASE_URL` exported. Goose is pinned to **v3.27.0** because it's the newest release that builds on Go 1.25.x; v3.28.0+ need Go 1.26. `GOTOOLCHAIN=local` makes a version bump fail loudly instead of silently downloading a newer toolchain.
 
@@ -132,6 +167,16 @@ Migration rules:
   - **Query parameters are rejected.** go-redis maps them onto client options, including `skip_verify`, which disables certificate verification.
   - **TLS:** in `staging` and `production`, `rediss://` is required unless the host is loopback (`localhost`, `127.0.0.0/8`, `::1`). The loopback exception supports a TLS-terminating sidecar proxy in the pod. A transparent service mesh where the app dials a cluster hostname over plaintext is **not** covered and would need a deliberate change. TLS always verifies certificates against the system CA store, with TLS 1.2 minimum. Supply a private CA through Go's standard `SSL_CERT_FILE`/`SSL_CERT_DIR`, not a new option.
   - Known gap (out of scope for now): go-redis writes some internal messages as plain text to stderr (e.g. `pool.go: failed to dial`), outside slog. They name only `host:port`.
+- Container rules:
+  - The image runs as numeric UID `65532`, so Kubernetes `runAsNonRoot` can verify it. Compose also sets a read-only root filesystem, drops all capabilities and enables `no-new-privileges`.
+  - `ENTRYPOINT` stays in exec form so the API is PID 1 and receives SIGTERM directly.
+  - `stop_grace_period` (15s) must stay longer than `SHUTDOWN_TIMEOUT` (10s).
+  - The health check runs `healthcheck /readyz` against the container's internal `PORT`. `API_PORT` changes only the host side. The probe's 3s limit must stay between the 2s `/readyz` timeout and Compose's 5s `timeout`.
+  - A database outage marks the container unhealthy, but Compose does not restart it. There is deliberately no restart policy, so startup failures stay visible.
+  - Compose builds `DATABASE_URL` and `REDIS_URL` itself with the `postgres` and `redis` hostnames. Do not use `env_file: .env`, because its `localhost` URLs are for host-run tools. Passwords are inserted unencoded, so they must be URL-safe.
+  - Keep `-h 127.0.0.1` in the PostgreSQL healthcheck. On first boot the image runs a temporary server on the Unix socket only, and a socket check could report healthy before the real server starts. The API fails fast and has no restart policy, so that race would stop it.
+  - The image contains no migrations. Run Goose from the host against the published PostgreSQL port.
+  - Bumping the Go or distroless image means updating both the tag and its digest. Go 1.25 no longer receives upstream patches, because Go 1.27 is current. Upgrading Go is separate work.
 
 ## Go standards used here
 
