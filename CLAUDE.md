@@ -10,11 +10,11 @@ Monorepo layout:
 
 | Path | Contents | Status |
 |---|---|---|
-| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–6 done |
+| `backend/` | Go API service (module `github.com/mounikavari9/playflow/backend`, Go 1.25.1) | Steps 1–6 done; Step 8 done |
 | `web/` | React frontend | not yet created |
 | `deploy/` | Kubernetes manifests, AWS infrastructure | not yet created |
 | `docker-compose.yml`, `.env.example` | local stack (PostgreSQL, Redis and the API), dev-only env template | Steps 2, 5 and 6 done |
-| `Makefile`, `scripts/migrate.sh` | developer commands, verified local migrations | Step 7 done |
+| `Makefile`, `scripts/migrate.sh` | developer commands, verified local migrations | Step 7 done; Step 8 done |
 | `.github/workflows/` | CI | not yet created |
 
 PAY-001 builds the foundation one step at a time. Status:
@@ -52,7 +52,11 @@ PAY-001 builds the foundation one step at a time. Status:
 - **Step 7 (done):** developer commands.
   - `Makefile`: Compose, Go quality and migration targets, compatible with macOS Make 3.81
   - `scripts/migrate.sh`: verifies the local database, then runs Goose
-- **Planned, not implemented yet:** domain tables, Redis features (caching, rate limiting), automated migrations in Compose, golangci-lint, GitHub Actions. Don't assume these exist.
+- **Step 8 (done):** Go linting.
+  - `backend/.golangci.yml`: nine explicitly enabled linters
+  - `Makefile`: `make lint`, which `make check` also runs, and an exact golangci-lint version check
+  - golangci-lint is pinned to **v2.12.2**, the newest release that declares `go 1.25.0`; v2.13.0+ declare `go 1.26.0`. It is a prebuilt binary installed with the checksum-verified steps in `README.md`, not an application dependency.
+- **Planned, not implemented yet:** domain tables, Redis features (caching, rate limiting), automated migrations in Compose, GitHub Actions. Don't assume these exist.
 
 ## Commands
 
@@ -69,13 +73,14 @@ make test-race         # unit tests with the race detector
 make fmt               # format project Go files
 make fmt-check         # check formatting without changing files
 make vet               # go vet
-make check             # fmt-check, vet, test-race, build and migration validation
+make lint              # golangci-lint, without changing files
+make check             # fmt-check, vet, lint, test-race, build and migration validation
 make migrate-status    # show applied and pending migrations (first use creates goose_db_version)
 make migrate-up        # apply pending migrations
 make migrate-down      # roll back one migration after typing its version number
 ```
 
-Prerequisites: Docker Desktop for Mac, Go 1.25 and Make. The first `make check` or migration command downloads Goose v3.27.0, so it needs internet access.
+Prerequisites: Docker Desktop for Mac, Go 1.25, Make and golangci-lint 2.12.2 (install steps are in `README.md`). The first `make check` or migration command downloads Goose v3.27.0, so it needs internet access.
 
 Run migration and rollback experiments only in the disposable `playflow-test` project:
 
@@ -222,10 +227,13 @@ Migration rules:
   - Never `include .env` or put credentials in a Make variable, because `make -n` and `make -p` print them.
   - `COMPOSE_PROJECT_NAME` may only be `playflow` or `playflow-test`. Run failure and rollback tests with `playflow-test`, on separate ports.
   - `COMPOSE_PROJECT_NAME` is read with `$(value ...)`, so Make never expands text inside it.
-  - Go targets remove inherited `DATABASE_URL`, `REDIS_URL`, `TEST_DATABASE_URL` and `TEST_REDIS_URL`, so `make test` skips integration tests. They also remove the nine PostgreSQL settings named in the `GO` variable: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSERVICE`, `PGSERVICEFILE`, `PGPASSFILE` and `PGSSLMODE`. Other `PG*` variables are not removed.
+  - Go targets remove inherited `DATABASE_URL`, `REDIS_URL`, `TEST_DATABASE_URL` and `TEST_REDIS_URL`, so `make test` skips integration tests. They also remove the nine PostgreSQL settings named in the `GO_ENV` variable: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSERVICE`, `PGSERVICEFILE`, `PGPASSFILE` and `PGSSLMODE`. Other `PG*` variables are not removed.
   - Recipes enter the backend with `cd ./backend`, because a plain `cd backend` follows `CDPATH` and could enter another project. `GOWORK=off` keeps other modules out of the build.
   - `make fmt` and `make fmt-check` skip only `backend/bin`, `backend/vendor`, `testdata` and hidden folders.
   - `make check` must not change source files or database state.
+  - `make lint` uses the same cleaned environment as the Go targets (`GO_ENV`) and never passes `--fix`. It needs no database, Redis or Docker.
+  - Bumping golangci-lint means updating `GOLANGCI_LINT_VERSION` and the version and both checksums in `README.md` together.
+  - Don't disable a linter or suppress a finding to make checks pass without approval.
 - `scripts/migrate.sh` rules:
   - Run it as `bash scripts/migrate.sh validate|status|up|down`, normally through the Makefile.
   - It restarts itself in a clean shell with an allowlisted environment, so inherited tracing, `BASH_ENV`, `CDPATH`, exported functions and `GOOSE_*`, `PG*` or `*_URL` settings never reach it.

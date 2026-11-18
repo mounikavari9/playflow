@@ -31,18 +31,23 @@ MIGRATE := COMPOSE_PROJECT_NAME=$(PROJECT) /bin/bash scripts/migrate.sh
 # cannot reach a real service. GOFLAGS and GOWORK are fixed so they cannot rewrite
 # go.mod or pull in another module. Recipes use `cd ./backend` because a plain
 # `cd backend` follows CDPATH and could enter a different project.
-GO := env -u DATABASE_URL -u REDIS_URL -u TEST_DATABASE_URL -u TEST_REDIS_URL \
+GO_ENV := env -u DATABASE_URL -u REDIS_URL -u TEST_DATABASE_URL -u TEST_REDIS_URL \
 	-u PGHOST -u PGPORT -u PGUSER -u PGPASSWORD -u PGDATABASE -u PGSERVICE \
 	-u PGSERVICEFILE -u PGPASSFILE -u PGSSLMODE \
-	GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOWORK=off go
+	GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOWORK=off
+GO := $(GO_ENV) go
+
+# The newest golangci-lint release that declares support for building on Go 1.25.
+# README.md has the verified install steps. Update both together.
+GOLANGCI_LINT_VERSION := 2.12.2
 
 # Project Go files only. Skips the build output in backend/bin, vendored code,
 # testdata and hidden folders. Packages such as internal/bin are still included.
 GO_FILES := find backend -type d \( -path backend/bin -o -path backend/vendor -o -name testdata -o -name '.*' \) -prune -o -type f -name '*.go'
 
-.PHONY: help up down logs ps build test test-race fmt fmt-check vet check \
+.PHONY: help up down logs ps build test test-race fmt fmt-check vet lint check \
 	migrate-status migrate-up migrate-down \
-	build-verify migrate-validate require-go require-docker
+	build-verify migrate-validate require-go require-golangci-lint require-docker
 
 help: ## Show available commands
 	@echo "PlayFlow commands:"
@@ -91,7 +96,11 @@ vet: require-go ## Run go vet
 	@echo "==> Running go vet"
 	@cd ./backend && $(GO) vet ./...
 
-check: fmt-check vet test-race build-verify migrate-validate ## Run all checks without changing files or the database
+lint: require-go require-golangci-lint ## Run golangci-lint without changing files
+	@echo "==> Running golangci-lint"
+	@cd ./backend && $(GO_ENV) golangci-lint run --config .golangci.yml ./...
+
+check: fmt-check vet lint test-race build-verify migrate-validate ## Run all checks without changing files or the database
 	@echo "==> All checks passed"
 
 migrate-status: require-go require-docker ## Show migrations (first use creates Goose's tracking table)
@@ -116,6 +125,14 @@ migrate-validate: require-go
 
 require-go:
 	@command -v go >/dev/null 2>&1 || { echo "Go is not installed. Install Go 1.25 from https://go.dev/dl/"; exit 1; }
+
+require-golangci-lint:
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint is not installed. Install version $(GOLANGCI_LINT_VERSION) using the steps in README.md."; exit 1; }
+	@found=$$(golangci-lint version --short 2>/dev/null); \
+	if [ "$$found" != "$(GOLANGCI_LINT_VERSION)" ]; then \
+		echo "golangci-lint $(GOLANGCI_LINT_VERSION) is required, but found '$$found'. Install it using the steps in README.md."; \
+		exit 1; \
+	fi
 
 require-docker:
 	@command -v docker >/dev/null 2>&1 || { echo "Docker is not installed. Install Docker Desktop first."; exit 1; }

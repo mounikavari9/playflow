@@ -5,6 +5,7 @@
 - Docker Desktop for Mac, running
 - Go 1.25
 - Make, included with the Xcode Command Line Tools (`xcode-select --install`)
+- golangci-lint 2.12.2, for `make lint` and `make check` (see [Install golangci-lint](#install-golangci-lint))
 - Internet access the first time you run `make check` or a migration command. Go downloads Goose v3.27.0 once, which can take a minute, and reuses it after that.
 
 ## Run locally
@@ -38,10 +39,39 @@ Run `make` to see this list.
 | `make fmt` | Format project Go files | Go |
 | `make fmt-check` | Check formatting without changing files | Go |
 | `make vet` | Run `go vet` | Go |
-| `make check` | Run all checks without changing files or the database | Go |
+| `make lint` | Run golangci-lint without changing files | Go, golangci-lint |
+| `make check` | Run all checks without changing files or the database | Go, golangci-lint |
 | `make migrate-status` | Show migrations. First use creates Goose's tracking table | Go, Docker, running PostgreSQL |
 | `make migrate-up` | Apply pending migrations | Go, Docker, running PostgreSQL |
 | `make migrate-down` | Roll back one migration after confirmation | Go, Docker, running PostgreSQL |
+
+## Install golangci-lint
+
+`make lint` requires exactly version 2.12.2, the newest release that declares support for building on Go 1.25. These steps download the official release for your Mac, stop if its SHA-256 checksum doesn't match, and install the binary into `~/.local/bin`:
+
+```sh
+(
+  set -eu
+  version=2.12.2
+  case "$(uname -m)" in
+    arm64)  arch=arm64; sha256=a9c54498731b3128f79e090be6110f3e5fffccc617b08142ed244d4126c73f29 ;;
+    x86_64) arch=amd64; sha256=f6f06d94b6241521c53d15450c5209b028270bf966f842afb11c030c79f5bc16 ;;
+    *) echo "Unsupported Mac architecture"; exit 1 ;;
+  esac
+  name="golangci-lint-$version-darwin-$arch"
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  cd "$tmp"
+  curl -fsSLO "https://github.com/golangci/golangci-lint/releases/download/v$version/$name.tar.gz"
+  echo "$sha256  $name.tar.gz" | shasum -a 256 -c -
+  tar -xzf "$name.tar.gz" "$name/golangci-lint"
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$name/golangci-lint" "$HOME/.local/bin/golangci-lint"
+)
+golangci-lint version --short   # must print 2.12.2
+```
+
+If the command isn't found, add `~/.local/bin` to your `PATH`.
 
 ## Database migrations
 
