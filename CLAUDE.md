@@ -14,7 +14,8 @@ Monorepo layout:
 | `web/` | React frontend | not yet created |
 | `deploy/` | Kubernetes manifests, AWS infrastructure | not yet created |
 | `docker-compose.yml`, `.env.example` | local stack (PostgreSQL, Redis and the API), dev-only env template | Steps 2, 5 and 6 done |
-| `Makefile`, `.github/workflows/` | dev commands, CI | not yet created |
+| `Makefile`, `scripts/migrate.sh` | developer commands, verified local migrations | Step 7 done |
+| `.github/workflows/` | CI | not yet created |
 
 PAY-001 builds the foundation one step at a time. Status:
 
@@ -48,9 +49,47 @@ PAY-001 builds the foundation one step at a time. Status:
   - `cmd/healthcheck`: standard-library probe binary, because the runtime image has no shell, curl or wget
   - `docker-compose.yml`: `api` service on `127.0.0.1:${API_PORT:-8080}`
   - `docker-compose.yml`: the `postgres` healthcheck now uses `pg_isready -h 127.0.0.1`, so it tests TCP
-- **Planned, not implemented yet:** domain tables, Redis features (caching, rate limiting), automated migrations in Compose, Makefile, golangci-lint, GitHub Actions. Don't assume these exist.
+- **Step 7 (done):** developer commands.
+  - `Makefile`: Compose, Go quality and migration targets, compatible with macOS Make 3.81
+  - `scripts/migrate.sh`: verifies the local database, then runs Goose
+- **Planned, not implemented yet:** domain tables, Redis features (caching, rate limiting), automated migrations in Compose, golangci-lint, GitHub Actions. Don't assume these exist.
 
 ## Commands
+
+Everyday commands, from the repo root. Run `make` to list them:
+
+```sh
+make up                # build and start PostgreSQL, Redis and the API
+make down              # stop the stack and keep the database volume
+make logs              # follow API logs
+make ps                # show container status
+make build             # build backend/bin/api and backend/bin/healthcheck
+make test              # unit tests
+make test-race         # unit tests with the race detector
+make fmt               # format project Go files
+make fmt-check         # check formatting without changing files
+make vet               # go vet
+make check             # fmt-check, vet, test-race, build and migration validation
+make migrate-status    # show applied and pending migrations (first use creates goose_db_version)
+make migrate-up        # apply pending migrations
+make migrate-down      # roll back one migration after typing its version number
+```
+
+Prerequisites: Docker Desktop for Mac, Go 1.25 and Make. The first `make check` or migration command downloads Goose v3.27.0, so it needs internet access.
+
+Run migration and rollback experiments only in the disposable `playflow-test` project:
+
+```sh
+make_test() { COMPOSE_PROJECT_NAME=playflow-test POSTGRES_PORT=55432 REDIS_PORT=56379 API_PORT=18080 make "$@"; }   # works in zsh and bash
+make_test up
+make_test migrate-up
+make_test down
+docker compose -p playflow-test down -v           # deletes only the test project's volume
+```
+
+After moving the repository to another folder, run `make down` and then `make up` from the new folder. Migration commands refuse containers started from a different folder. The database volume is kept.
+
+The raw commands below remain available for cases the Makefile does not cover.
 
 Local PostgreSQL and Redis, from the repo root (credentials are dev-only defaults; override in a gitignored `.env`, see `.env.example`):
 
@@ -177,6 +216,25 @@ Migration rules:
   - Keep `-h 127.0.0.1` in the PostgreSQL healthcheck. On first boot the image runs a temporary server on the Unix socket only, and a socket check could report healthy before the real server starts. The API fails fast and has no restart policy, so that race would stop it.
   - The image contains no migrations. Run Goose from the host against the published PostgreSQL port.
   - Bumping the Go or distroless image means updating both the tag and its digest. Go 1.25 no longer receives upstream patches, because Go 1.27 is current. Upgrading Go is separate work.
+- Makefile rules:
+  - Stay compatible with GNU Make 3.81 and Bash 3.2, the macOS versions. Avoid `.ONESHELL`, `.SHELLFLAGS`, `!=` and `$(file ...)`.
+  - Never add `down -v`, `volume rm`, `prune`, a database reset or a Goose `reset` or `down-to` target.
+  - Never `include .env` or put credentials in a Make variable, because `make -n` and `make -p` print them.
+  - `COMPOSE_PROJECT_NAME` may only be `playflow` or `playflow-test`. Run failure and rollback tests with `playflow-test`, on separate ports.
+  - `COMPOSE_PROJECT_NAME` is read with `$(value ...)`, so Make never expands text inside it.
+  - Go targets remove inherited `DATABASE_URL`, `REDIS_URL`, `TEST_DATABASE_URL` and `TEST_REDIS_URL`, so `make test` skips integration tests. They also remove the nine PostgreSQL settings named in the `GO` variable: `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSERVICE`, `PGSERVICEFILE`, `PGPASSFILE` and `PGSSLMODE`. Other `PG*` variables are not removed.
+  - Recipes enter the backend with `cd ./backend`, because a plain `cd backend` follows `CDPATH` and could enter another project. `GOWORK=off` keeps other modules out of the build.
+  - `make fmt` and `make fmt-check` skip only `backend/bin`, `backend/vendor`, `testdata` and hidden folders.
+  - `make check` must not change source files or database state.
+- `scripts/migrate.sh` rules:
+  - Run it as `bash scripts/migrate.sh validate|status|up|down`, normally through the Makefile.
+  - It restarts itself in a clean shell with an allowlisted environment, so inherited tracing, `BASH_ENV`, `CDPATH`, exported functions and `GOOSE_*`, `PG*` or `*_URL` settings never reach it.
+  - It never reads `DATABASE_URL`. It takes the credentials and port from the running PostgreSQL container and always connects to `127.0.0.1`.
+  - Before Goose runs it verifies a local Docker endpoint, the Compose project, service, repository folder, image, health and data volume, and a single loopback port. It then proves the port reaches that container by sending a credential-free PostgreSQL startup message with a random user name and finding that name in the container's process list. Credentials are read only after this proof, and any failed check stops the command.
+  - The connection string goes to Goose through `GOOSE_DBSTRING`, never command arguments, and Goose output is redacted.
+  - `make migrate-down` requires an interactive terminal and the exact version number. There is deliberately no bypass.
+  - `make migrate-up` and `make migrate-down` hold a per-project lock in `$TMPDIR`, so they can't overlap on this machine. **Residual risk:** raw Goose commands and other machines don't take this lock, so never run them during a migration.
+  - **Goose v3.27.0 writes on first use:** `status` and `version` create `goose_db_version` and insert a version 0 row if the table is missing, so `make migrate-status` is read-only only after that.
 
 ## Go standards used here
 
