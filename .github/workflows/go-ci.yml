@@ -1,0 +1,68 @@
+# Go CI runs `make check` (formatting, vet, lint, race tests, build and migration
+# file validation). It needs no database, Redis, Docker or secrets.
+name: Go CI
+
+on:
+  push:
+    branches:
+      - main
+      - chore/PAY-001-project-setup
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# Runs are grouped by event and ref, so a push run never cancels a pull request
+# run or a run on another branch. A newer pull request run cancels the running
+# one for that pull request. A running push job is never cancelled, but GitHub
+# keeps only one pending run per group, so a newer pending run replaces an older
+# pending run in the same group.
+concurrency:
+  group: go-ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: make check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Must match GOLANGCI_LINT_VERSION in the Makefile, which make check enforces.
+      # The checksum is from the official golangci-lint-2.12.2-checksums.txt.
+      GOLANGCI_LINT_VERSION: 2.12.2
+      GOLANGCI_LINT_SHA256: 8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Install golangci-lint
+        run: |
+          set -euo pipefail
+          name="golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          curl -fsSLo "$tmp/$name.tar.gz" \
+            "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/$name.tar.gz"
+          echo "${GOLANGCI_LINT_SHA256}  $tmp/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$tmp/$name.tar.gz" -C "$tmp" "$name/golangci-lint"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$tmp/$name/golangci-lint" "$HOME/.local/bin/golangci-lint"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Show tool versions
+        run: |
+          go version
+          golangci-lint version --short
+
+      - name: Run make check
+        run: make check

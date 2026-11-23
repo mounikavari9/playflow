@@ -38,7 +38,7 @@ GO_ENV := env -u DATABASE_URL -u REDIS_URL -u TEST_DATABASE_URL -u TEST_REDIS_UR
 GO := $(GO_ENV) go
 
 # The newest golangci-lint release that declares support for building on Go 1.25.
-# README.md has the verified install steps. Update both together.
+# README.md and .github/workflows/go-ci.yml pin it too. Update all three together.
 GOLANGCI_LINT_VERSION := 2.12.2
 
 # Project Go files only. Skips the build output in backend/bin, vendored code,

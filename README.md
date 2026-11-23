@@ -73,6 +73,14 @@ golangci-lint version --short   # must print 2.12.2
 
 If the command isn't found, add `~/.local/bin` to your `PATH`.
 
+When you change the golangci-lint version, update the checksums here, `GOLANGCI_LINT_VERSION` in the `Makefile`, and the version and Linux AMD64 checksum in `.github/workflows/go-ci.yml`. Take every checksum from the release's official `golangci-lint-<version>-checksums.txt`.
+
+## Continuous integration
+
+The **Go CI** GitHub Actions workflow (`.github/workflows/go-ci.yml`) runs `make check` on every push to `main` or `chore/PAY-001-project-setup`, and on every pull request targeting `main`. It runs on Ubuntu 24.04 with the Go version from `backend/go.mod` and golangci-lint 2.12.2. It needs no database, Redis, Docker or secrets, and its token can only read the repository.
+
+To reproduce it locally, run `make check`. It runs the same checks as CI. For identical results, your tool versions must match CI: Go 1.25.1 (from `backend/go.mod`) and golangci-lint 2.12.2. `make check` enforces the golangci-lint version, but a later Go 1.25.x patch also passes locally.
+
 ## Database migrations
 
 Migration commands only work on the local PostgreSQL container started by `make up`. They ignore any `DATABASE_URL` in your shell, and they stop if the target can't be verified. They're tested with Docker Desktop on macOS and refuse remote Docker engines.

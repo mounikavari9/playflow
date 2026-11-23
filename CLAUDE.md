@@ -15,7 +15,7 @@ Monorepo layout:
 | `deploy/` | Kubernetes manifests, AWS infrastructure | not yet created |
 | `docker-compose.yml`, `.env.example` | local stack (PostgreSQL, Redis and the API), dev-only env template | Steps 2, 5 and 6 done |
 | `Makefile`, `scripts/migrate.sh` | developer commands, verified local migrations | Step 7 done; Step 8 done |
-| `.github/workflows/` | CI | not yet created |
+| `.github/workflows/` | CI (`go-ci.yml`, the Go CI workflow) | Step 9 implemented, awaiting GitHub verification |
 
 PAY-001 builds the foundation one step at a time. Status:
 
@@ -56,7 +56,11 @@ PAY-001 builds the foundation one step at a time. Status:
   - `backend/.golangci.yml`: nine explicitly enabled linters
   - `Makefile`: `make lint`, which `make check` also runs, and an exact golangci-lint version check
   - golangci-lint is pinned to **v2.12.2**, the newest release that declares `go 1.25.0`; v2.13.0+ declare `go 1.26.0`. It is a prebuilt binary installed with the checksum-verified steps in `README.md`, not an application dependency.
-- **Planned, not implemented yet:** domain tables, Redis features (caching, rate limiting), automated migrations in Compose, GitHub Actions. Don't assume these exist.
+- **Step 9 (implemented, awaiting GitHub verification):** GitHub Actions CI. It is not verified until the workflow passes on GitHub.
+  - `.github/workflows/go-ci.yml`: the **Go CI** workflow, which runs `make check` on Ubuntu 24.04
+  - It runs on pushes to `main` and `chore/PAY-001-project-setup`, and on pull requests targeting `main`
+  - Go comes from `backend/go.mod` (1.25.1). golangci-lint 2.12.2 is installed from the official Linux AMD64 release after a SHA-256 check
+- **Planned, not implemented yet:** domain tables, Redis features (caching, rate limiting), automated migrations in Compose. Don't assume these exist.
 
 ## Commands
 
@@ -232,7 +236,7 @@ Migration rules:
   - `make fmt` and `make fmt-check` skip only `backend/bin`, `backend/vendor`, `testdata` and hidden folders.
   - `make check` must not change source files or database state.
   - `make lint` uses the same cleaned environment as the Go targets (`GO_ENV`) and never passes `--fix`. It needs no database, Redis or Docker.
-  - Bumping golangci-lint means updating `GOLANGCI_LINT_VERSION` and the version and both checksums in `README.md` together.
+  - Bumping golangci-lint means updating `GOLANGCI_LINT_VERSION`, the version and both checksums in `README.md`, and `GOLANGCI_LINT_VERSION` and `GOLANGCI_LINT_SHA256` (Linux AMD64) in `.github/workflows/go-ci.yml` together. Take every checksum from the release's official checksums file.
   - Don't disable a linter or suppress a finding to make checks pass without approval.
 - `scripts/migrate.sh` rules:
   - Run it as `bash scripts/migrate.sh validate|status|up|down`, normally through the Makefile.
@@ -243,6 +247,14 @@ Migration rules:
   - `make migrate-down` requires an interactive terminal and the exact version number. There is deliberately no bypass.
   - `make migrate-up` and `make migrate-down` hold a per-project lock in `$TMPDIR`, so they can't overlap on this machine. **Residual risk:** raw Goose commands and other machines don't take this lock, so never run them during a migration.
   - **Goose v3.27.0 writes on first use:** `status` and `version` create `goose_db_version` and insert a version 0 row if the table is missing, so `make migrate-status` is read-only only after that.
+
+- CI rules (`.github/workflows/go-ci.yml`):
+  - CI runs `make check` and nothing else. Add new checks to the Makefile, not to the workflow.
+  - Use only GitHub-owned actions, pinned to a verified full commit SHA with a version comment. Pinned: `actions/checkout` v7.0.1, `actions/setup-go` v7.1.0.
+  - Keep `permissions: contents: read`, `persist-credentials: false` and `pull_request` (never `pull_request_target`). CI uses no secrets, databases, Redis or Docker.
+  - Go caching comes from `setup-go`, keyed on `backend/go.sum`.
+  - The concurrency group includes the event name and ref. A newer pull request run cancels the running one for that pull request. Running push jobs are never cancelled, but GitHub keeps only one pending run per group, so a newer pending run replaces an older pending run in the same group.
+  - CI runs on Linux with GNU Make and Bash 5, so it does not prove macOS Make 3.81 and Bash 3.2 compatibility. Check that locally.
 
 ## Go standards used here
 
