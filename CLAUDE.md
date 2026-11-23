@@ -15,7 +15,7 @@ Monorepo layout:
 | `deploy/` | Kubernetes manifests, AWS infrastructure | not yet created |
 | `docker-compose.yml`, `.env.example` | local stack (PostgreSQL, Redis and the API), dev-only env template | Steps 2, 5 and 6 done |
 | `Makefile`, `scripts/migrate.sh` | developer commands, verified local migrations | Step 7 done; Step 8 done |
-| `.github/workflows/` | CI (`go-ci.yml`, the Go CI workflow) | Step 9 implemented, awaiting GitHub verification |
+| `.github/workflows/` | CI (`go-ci.yml`, the Go CI workflow) | Step 9 done |
 
 PAY-001 builds the foundation one step at a time. Status:
 
@@ -56,7 +56,7 @@ PAY-001 builds the foundation one step at a time. Status:
   - `backend/.golangci.yml`: nine explicitly enabled linters
   - `Makefile`: `make lint`, which `make check` also runs, and an exact golangci-lint version check
   - golangci-lint is pinned to **v2.12.2**, the newest release that declares `go 1.25.0`; v2.13.0+ declare `go 1.26.0`. It is a prebuilt binary installed with the checksum-verified steps in `README.md`, not an application dependency.
-- **Step 9 (implemented, awaiting GitHub verification):** GitHub Actions CI. It is not verified until the workflow passes on GitHub.
+- **Step 9 (done):** GitHub Actions CI, verified on GitHub. Go CI passed on commit `339d146` (job `make check`).
   - `.github/workflows/go-ci.yml`: the **Go CI** workflow, which runs `make check` on Ubuntu 24.04
   - It runs on pushes to `main` and `chore/PAY-001-project-setup`, and on pull requests targeting `main`
   - Go comes from `backend/go.mod` (1.25.1). golangci-lint 2.12.2 is installed from the official Linux AMD64 release after a SHA-256 check
